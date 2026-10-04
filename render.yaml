@@ -1,0 +1,31 @@
+services:
+  # БЕСПЛАТНЫЙ круглосуточный вариант: Render free + пинг-сторож + снимки базы
+  # во внешнем хранилище. Подробно: deploy/FREE-24-7.md
+  #
+  # Что заполнить в панели Render:
+  #   BOT_TOKEN       - токен от @BotFather (обязательно)
+  #   SNAPSHOT_URL    - REST-адрес бесплатного key-value (Upstash), рекомендуется
+  #   SNAPSHOT_TOKEN  - токен того же хранилища
+  # Адрес webhook бот определит сам из RENDER_EXTERNAL_URL - заполнять не нужно.
+  - type: web
+    name: english-starter-bot
+    runtime: docker
+    plan: free
+    region: frankfurt
+    dockerfilePath: ./deploy/Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: SNAPSHOT_URL
+        sync: false
+      - key: SNAPSHOT_TOKEN
+        sync: false
+      - key: AUTO_BACKUP
+        value: "1"
+      - key: SNAPSHOT_INTERVAL
+        value: "600"
+      - key: PYTHONUNBUFFERED
+        value: "1"

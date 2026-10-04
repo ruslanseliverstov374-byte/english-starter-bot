@@ -1,0 +1,17 @@
+[Unit]
+Description=English Starter Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/english-bot
+EnvironmentFile=/opt/english-bot/.env
+ExecStart=/usr/bin/python3 /opt/english-bot/bot.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/english-bot.log
+StandardError=append:/var/log/english-bot.log
+
+[Install]
+WantedBy=multi-user.target
