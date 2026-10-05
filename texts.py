@@ -381,10 +381,10 @@ def grammar_index_text():
     return "\n".join(lines), inline(keyboard)
 
 
-def reminder_text(user):
+def reminder_text(user, late_minutes=0):
     day = user["day"]
     plan = plan_for_day(day, user["per_day"] or 5)
-    return "\n".join([
+    lines = [
         "☀️ <b>Доброе утро!</b>",
         "",
         "День <b>%d</b> из %d · неделя %d «%s»" % (day, TOTAL_DAYS, plan["week"], esc(plan["week_title"])),
@@ -392,7 +392,11 @@ def reminder_text(user):
         "🔥 Серия: %d дн." % user["streak"],
         "",
         "10 минут — и день закрыт. Начнём?",
-    ])
+    ]
+    if int(late_minutes or 0) > 180:
+        lines += ["", "⏳ <i>Напоминание с задержкой: сервер просыпался. Ничего не потеряно — "
+                      "продолжаем с того же дня.</i>"]
+    return "\n".join(lines)
 
 
 def reminder_keyboard():
