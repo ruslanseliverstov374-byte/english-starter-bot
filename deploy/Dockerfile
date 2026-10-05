@@ -9,7 +9,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-COPY bot.py course.py store.py texts.py tgbot.py ./
+COPY *.py ./
 COPY content/ ./content/
 COPY tools/ ./tools/
 
