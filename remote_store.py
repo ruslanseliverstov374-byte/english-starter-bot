@@ -166,6 +166,112 @@ def restore_if_needed(data_dir, remote, log=None):
         return False
 
 
+class TelegramSnapshot:
+    """Хранит снимок базы в чате владельца как ЗАКРЕПЛЁННЫЙ файл.
+
+    Почему так: у бесплатных хостингов диск временный, а чат в Telegram - постоянный.
+    Бот отправляет копию, закрепляет её (предыдущую удаляет, чтобы не мусорить),
+    а после перезапуска читает закреплённое сообщение через getChat и восстанавливает
+    прогресс сам. Никаких сторонних сервисов и регистраций не требуется.
+    """
+
+    def __init__(self, tg, chat_id=None, chat_id_provider=None, log=None,
+                 caption="🗄 Резервная копия прогресса — нужна боту для восстановления"):
+        self.tg = tg
+        self.chat_id = int(chat_id) if chat_id else None
+        self.chat_id_provider = chat_id_provider
+        self.log = log or (lambda message: None)
+        self.caption = caption
+
+    @property
+    def enabled(self):
+        return bool(self.chat_id or self.chat_id_provider)
+
+    def _target(self):
+        if self.chat_id:
+            return self.chat_id
+        if self.chat_id_provider:
+            try:
+                found = self.chat_id_provider()
+                if found:
+                    self.chat_id = int(found)
+                    return self.chat_id
+            except Exception:
+                return None
+        return None
+
+    def _pinned(self):
+        chat_id = self._target()
+        if not chat_id:
+            return {}
+        try:
+            chat = self.tg.call("getChat", {"chat_id": chat_id})
+            return chat.get("pinned_message") or {}
+        except Exception:
+            return {}
+
+    def has_snapshot(self):
+        return bool((self._pinned().get("document") or {}).get("file_id"))
+
+    def upload(self, file_path):
+        chat_id = self._target()
+        if not chat_id or not os.path.exists(file_path):
+            return False
+        previous = self._pinned()
+        try:
+            message = self.tg.send_document(
+                chat_id, file_path, caption=self.caption,
+                filename="english-starter-backup.db", disable_notification=True)
+            message_id = message.get("message_id")
+            self.tg.call("pinChatMessage", {
+                "chat_id": chat_id, "message_id": message_id, "disable_notification": True,
+            })
+            if previous.get("message_id") and previous["message_id"] != message_id:
+                try:
+                    self.tg.call("deleteMessage",
+                                 {"chat_id": chat_id, "message_id": previous["message_id"]})
+                except Exception:
+                    pass
+            self.log("снимок базы закреплён в чате Telegram (%d КБ)" % (
+                os.path.getsize(file_path) // 1024))
+            return True
+        except Exception as err:
+            self.log("не удалось сохранить копию в Telegram: %s" % err)
+            return False
+
+    def download(self, destination):
+        pinned = self._pinned()
+        file_id = (pinned.get("document") or {}).get("file_id")
+        if not file_id:
+            self.log("закреплённой копии в чате нет")
+            return False
+        try:
+            _, size = self.tg.download_file(file_id, destination)
+            with open(destination, "rb") as handle:
+                if not handle.read(16).startswith(b"SQLite format 3"):
+                    self.log("закреплённый файл не похож на базу")
+                    return False
+            self.log("прогресс восстановлен из закреплённой копии в Telegram (%d КБ)" % (size // 1024))
+            return True
+        except Exception as err:
+            self.log("не удалось скачать закреплённую копию: %s" % err)
+            return False
+
+
+def build_snapshot_provider(tg, log=None, chat_id=None):
+    """Выбирает хранилище снимков: внешний key-value (если задан) или чат Telegram."""
+    log = log or (lambda message: None)
+    url = os.environ.get("SNAPSHOT_URL")
+    token = os.environ.get("SNAPSHOT_TOKEN")
+    if url and token:
+        return RemoteSnapshot(url=url, token=token,
+                              key=os.environ.get("SNAPSHOT_KEY", "english-starter-db"), log=log)
+    if (os.environ.get("TELEGRAM_BACKUP") or "1").strip() != "0":
+        chat = chat_id or os.environ.get("ADMIN_CHAT_ID") or os.environ.get("BACKUP_CHAT_ID")
+        return TelegramSnapshot(tg, chat_id=chat, log=log)
+    return RemoteSnapshot(url="", token="", log=log)
+
+
 class SnapshotUploader:
     """Фоновый поток: раз в N секунд отправляет снимок базы во внешнее хранилище."""
 
