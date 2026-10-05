@@ -9,6 +9,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# Копируем ВСЕ модули Python из корня: так новый модуль не забудется при добавлении
 COPY *.py ./
 COPY content/ ./content/
 COPY tools/ ./tools/
