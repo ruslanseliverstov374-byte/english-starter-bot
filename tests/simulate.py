@@ -251,6 +251,7 @@ def shift_time_back_one_day(store, chat_id):
 
 def main():
     botmod.log = lambda message: None      # в тесте логи бота не нужны
+    os.environ["TELEGRAM_BACKUP"] = "0"    # и внешние копии: тест не должен слать файлы
     print("=" * 70)
     print("ПРОВЕРКА КОНТЕНТА")
     print("=" * 70)
