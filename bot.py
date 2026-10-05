@@ -155,6 +155,7 @@ class Bot:
         self.reminder_thread = None
         self.stopping = False
         self.started_at = utcnow()
+        self.last_ping_at = None         # последний внешний сигнал (/health)
         self.pinned_checked = set()      # какие чаты уже проверяли на закреплённую копию
         # Хранилище снимков базы: внешний key-value либо закреплённый файл в Telegram.
         self.remote = remote if remote is not None else build_snapshot_provider(self.tg, log=log)
@@ -1571,6 +1572,10 @@ class Bot:
                     log("handler error:\n%s" % traceback.format_exc())
                 self.remember_offset()
 
+    def note_health_ping(self):
+        """Отмечает внешний сигнал (пинг сторожевой задачи) - видно на странице проекта."""
+        self.last_ping_at = utcnow()
+
     def landing_page(self):
         """Публичная страница со статистикой проекта (без личных данных) - для портфолио и health-check."""
         try:
@@ -1583,6 +1588,11 @@ class Bot:
             counts, srs = {"users": 0}, 0
         uptime = utcnow() - self.started_at
         hours, remainder = divmod(int(uptime.total_seconds()), 3600)
+        if self.last_ping_at:
+            minutes_ago = int((utcnow() - self.last_ping_at).total_seconds() // 60)
+            ping_value, ping_label = ("%d мин" % minutes_ago if minutes_ago else "сейчас"), "последний сигнал пинга"
+        else:
+            ping_value, ping_label = "—", "внешних пингов не было"
         username = (self.me or {}).get("username", "")
         bot_link = "https://t.me/%s" % username if username else "#"
         return ("<!DOCTYPE html><html lang='ru'><head><meta charset='utf-8'>"
@@ -1608,11 +1618,12 @@ class Bot:
                 "<div class='stat'><div class='num'>%d</div><div class='lbl'>учеников</div></div>"
                 "<div class='stat'><div class='num'>%d</div><div class='lbl'>слов в повторении</div></div>"
                 "<div class='stat'><div class='num'>%d ч</div><div class='lbl'>бот работает без сбоев</div></div>"
+                "<div class='stat'><div class='num'>%s</div><div class='lbl'>%s</div></div>"
                 "</div><a class='btn' href='%s'>Открыть бота в Telegram</a>"
                 "<footer>Интервальное повторение (1→2→4→8→16→32 дня), 7 типов упражнений, "
                 "ежедневные напоминания. Работает круглосуточно.</footer></div></body></html>") % (
             STATS["words"], STATS["grammar"], STATS["drill_items"], STATS["dialogues"],
-            STATS["days"], counts["users"], srs, hours, bot_link,
+            STATS["days"], counts["users"], srs, hours, ping_value, ping_label, bot_link,
         )
 
     def run_webhook(self, url, port=8080, secret=None):
@@ -1633,6 +1644,7 @@ class Bot:
             def do_GET(self):
                 path = self.path.split("?")[0]
                 if path in ("/health", "/healthz"):
+                    bot.note_health_ping()
                     self._reply(200, b"ok")
                     return
                 if path == "/":
