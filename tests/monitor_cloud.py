@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Одна строка состояния облачного сервиса - для наблюдения за пересборкой."""
+"""Одна строка состояния облачного сервиса - для наблюдения за пересборкой и пингом."""
 
 import re
 import sys
@@ -14,11 +14,9 @@ try:
         html = response.read().decode("utf-8", "replace")
     stats = {label: value for value, label in
              re.findall(r"class='num'>([^<]+)</div><div class='lbl'>([^<]+)<", html)}
-    print("%s -> учеников: %s | слов в повторении: %s | работает: %s" % (
-        time.strftime("%H:%M:%S"),
-        stats.get("учеников", "?"),
-        stats.get("слов в повторении", "?"),
-        stats.get("бот работает без сбоев", "?"),
-    ))
+    keys = ["учеников", "слов в повторении", "последний сигнал пинга",
+            "внешних пингов не было", "бот работает без сбоев"]
+    parts = ["%s: %s" % (key, stats[key]) for key in keys if key in stats]
+    print("%s -> %s" % (time.strftime("%H:%M:%S"), " | ".join(parts) or "страница без статистики"))
 except Exception as error:
     print("%s -> сервис недоступен (%s)" % (time.strftime("%H:%M:%S"), error))
