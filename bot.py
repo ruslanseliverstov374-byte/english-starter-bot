@@ -38,7 +38,13 @@ from content import (
     validate,
 )
 from instance_lock import InstanceLock
-from remote_store import RemoteSnapshot, SnapshotUploader, restore_if_needed
+from remote_store import (
+    RemoteSnapshot,
+    SnapshotUploader,
+    TelegramSnapshot,
+    build_snapshot_provider,
+    restore_if_needed,
+)
 from store import Store, iso, local_date_str, local_now, utcnow
 from tgbot import Telegram, TgError, btn, inline, reply_keyboard, url_btn
 
@@ -140,7 +146,7 @@ def resolve_token(cli_token=None):
 
 
 class Bot:
-    def __init__(self, token, db_path=DB_DEFAULT, api_base=None):
+    def __init__(self, token, db_path=DB_DEFAULT, api_base=None, remote=None):
         self.tg = Telegram(token, api_base=api_base) if api_base else Telegram(token)
         self.store = Store(db_path)
         self.rng = random.Random()
@@ -149,17 +155,15 @@ class Bot:
         self.reminder_thread = None
         self.stopping = False
         self.started_at = utcnow()
-        self.remote = RemoteSnapshot(
-            url=os.environ.get("SNAPSHOT_URL"),
-            token=os.environ.get("SNAPSHOT_TOKEN"),
-            key=os.environ.get("SNAPSHOT_KEY", "english-starter-db"),
-            log=log,
-        )
-        self.uploader = SnapshotUploader(
-            self.store, self.remote,
-            interval=int(os.environ.get("SNAPSHOT_INTERVAL", "600")),
-            log=log,
-        )
+        self.pinned_checked = False
+        # Хранилище снимков базы: внешний key-value либо закреплённый файл в Telegram.
+        self.remote = remote if remote is not None else build_snapshot_provider(self.tg, log=log)
+        if isinstance(self.remote, TelegramSnapshot) and not self.remote.chat_id:
+            self.remote.chat_id_provider = self.admin_chat_id
+        interval = os.environ.get("SNAPSHOT_INTERVAL")
+        if not interval:
+            interval = "1800" if isinstance(self.remote, TelegramSnapshot) else "600"
+        self.uploader = SnapshotUploader(self.store, self.remote, interval=int(interval), log=log)
 
     # ------------------------------------------------------------------
     # низкий уровень
@@ -233,6 +237,14 @@ class Bot:
             message.get("from", {}).get("username"),
             message.get("from", {}).get("first_name"),
         )
+        if self.maybe_restore_from_pinned(chat_id):
+            self.send(chat_id, "\n".join([
+                "♻️ <b>Прогресс восстановлен</b>",
+                "",
+                "Бот перезапустился на бесплатном хостинге и поднял вашу базу "
+                "из закреплённой копии в этом чате.",
+                "Продолжаем с того же дня — посмотрите /progress.",
+            ]), texts.MAIN_MENU)
         if message.get("document"):
             self.restore_from_document(chat_id, message["document"])
             return
@@ -1158,6 +1170,54 @@ class Bot:
                       [btn("🆕 Новые слова", "go|newwords"), btn("📖 Словарь", "go|dictionary")],
                   ]))
 
+    def maybe_restore_from_pinned(self, chat_id):
+        """Спасательный круг после холодного старта бесплатного хостинга.
+
+        Если база пустая (никто ещё не занимался), а в чате владельца лежит
+        закреплённая копия — восстанавливаем прогресс целиком. Так бот
+        поднимается сам, без переменных окружения и ручных действий.
+        """
+        if not isinstance(self.remote, TelegramSnapshot) or self.pinned_checked:
+            return False
+        try:
+            with self.store.lock:
+                answers = self.store.conn.execute("SELECT COUNT(*) AS c FROM answers").fetchone()["c"]
+                learned = self.store.conn.execute(
+                    "SELECT COUNT(*) AS c FROM srs WHERE learned = 1").fetchone()["c"]
+            if answers or learned:
+                self.pinned_checked = True          # в базе есть настоящая работа - не трогаем
+                return False
+
+            remote = TelegramSnapshot(self.tg, chat_id=chat_id, log=log)
+            if not remote.has_snapshot():
+                self.pinned_checked = True
+                return False
+
+            temp = os.path.join(DATA_DIR, "pinned-restore.db")
+            if not remote.download(temp):
+                self.pinned_checked = True
+                return False
+
+            db_path = self.store.path
+            safety = db_path + ".before-restore"
+            self.store.close()
+            if os.path.exists(db_path):
+                shutil.copy2(db_path, safety)
+            shutil.copy2(temp, db_path)
+            os.remove(temp)
+            self.store = Store(db_path)
+
+            self.remote.chat_id = chat_id
+            interval = int(os.environ.get("SNAPSHOT_INTERVAL") or 1800)
+            self.uploader = SnapshotUploader(self.store, self.remote, interval=interval, log=log)
+            self.pinned_checked = True
+            log("прогресс восстановлен из закреплённой копии в чате %s" % chat_id)
+            return True
+        except Exception:
+            log("не удалось восстановить прогресс из копии:\n%s" % traceback.format_exc())
+            self.pinned_checked = True
+            return False
+
     # ------------------------------------------------------------------
     # callback-кнопки
     # ------------------------------------------------------------------
@@ -1392,8 +1452,12 @@ class Bot:
             except Exception:
                 target = 9 * 60
             current = now_local.hour * 60 + now_local.minute
-            if target <= current <= target + 180:
-                self.send(user["chat_id"], texts.reminder_text(user), texts.reminder_keyboard())
+            # Учитываем и «догоняющие» напоминания: если сервер спал и проснулся позже,
+            # ученик всё равно получит урок - с пометкой о задержке.
+            if target <= current <= min(target + 600, 22 * 60):
+                late = current - target
+                self.send(user["chat_id"], texts.reminder_text(user, late_minutes=late),
+                          texts.reminder_keyboard())
                 self.store.update_user(user["chat_id"], last_remind_date=today)
                 sent += 1
         return sent
@@ -1441,7 +1505,9 @@ class Bot:
             self.offset = int(saved) + 1
         log("Бот запущен: @%s (%s)" % (self.me.get("username"), self.me.get("first_name")))
         if self.remote.enabled:
-            log("внешнее хранилище снимков включено: %s" % self.remote.url)
+            kind = "чат Telegram (закреплённая копия)" if isinstance(self.remote, TelegramSnapshot) \
+                else "внешнее хранилище %s" % getattr(self.remote, "url", "")
+            log("хранилище снимков базы: %s" % kind)
             self.uploader.start()
             atexit.register(self.uploader.upload_now)
         self.start_reminders()
@@ -1659,16 +1725,14 @@ def main(argv=None):
         # стабильный секрет: путь webhook не меняется между перезапусками
         secret = hashlib.sha256(("english-starter:" + token).encode("utf-8")).hexdigest()[:16]
 
-    # Бесплатные хостинги стирают диск при перезапуске: если локальной базы нет,
-    # а во внешнем хранилище снимок есть - забираем его до старта бота.
-    remote = RemoteSnapshot(
-        url=os.environ.get("SNAPSHOT_URL"),
-        token=os.environ.get("SNAPSHOT_TOKEN"),
-        key=os.environ.get("SNAPSHOT_KEY", "english-starter-db"),
-        log=log,
-    )
-    if remote.enabled:
-        restore_if_needed(os.path.dirname(os.path.abspath(args.db)), remote, log=log)
+    # Бесплатные хостинги стирают диск при перезапуске: снимок базы может лежать
+    # во внешнем key-value хранилище или в закреплённом файле чата Telegram.
+    # Клиент Telegram нужен уже здесь, поэтому создаём его до старта бота.
+    early_tg = Telegram(token, api_base=args.api_base) if args.api_base else Telegram(token)
+    remote = build_snapshot_provider(early_tg, log=log)
+    if remote.enabled and restore_if_needed(os.path.dirname(os.path.abspath(args.db)),
+                                            remote, log=log):
+        log("прогресс поднят из резервной копии")
 
     # Один экземпляр на базу: второй процесс не должен драться за getUpdates
     lock = InstanceLock(args.lock or LOCK_PATH, os.environ.get("PID_PATH") or PID_PATH)
@@ -1679,7 +1743,7 @@ def main(argv=None):
         log(message)
         return 3
 
-    bot = Bot(token, db_path=args.db, api_base=args.api_base)
+    bot = Bot(token, db_path=args.db, api_base=args.api_base, remote=remote)
     try:
         if args.remind_once:
             bot.me = bot.tg.get_me()
