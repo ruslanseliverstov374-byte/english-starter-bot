@@ -138,7 +138,8 @@ class Telegram:
 
     # ---------------- файлы ----------------
 
-    def send_document(self, chat_id, file_path, caption=None, filename=None):
+    def send_document(self, chat_id, file_path, caption=None, filename=None,
+                      disable_notification=False):
         """Отправляет файл (multipart/form-data) - например, резервную копию базы."""
         path = file_path
         filename = filename or os.path.basename(path)
@@ -156,6 +157,8 @@ class Telegram:
             parts.append(b"\r\n")
 
         field("chat_id", chat_id)
+        if disable_notification:
+            field("disable_notification", "true")
         if caption:
             field("caption", caption)
             field("parse_mode", "HTML")
