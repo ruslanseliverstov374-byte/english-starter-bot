@@ -1,0 +1,36 @@
+name: keepalive
+
+# Не даёт бесплатному сервису Render засыпать: раз в 5 минут дёргает /health.
+# Нужно, чтобы приходили напоминания (спящий сервис не может их отправить).
+#
+# Настройка: заполнять ничего не нужно — адрес сервиса уже прописан ниже.
+# Если сервис переименуете: поменяйте DEFAULT_URL тут или задайте переменную
+# репозитория BOT_URL (Settings → Secrets and variables → Actions → Variables).
+#
+# Важно: GitHub отключает scheduled-workflow после 60 дней без активности в репозитории.
+# Если это критично, продублируйте пинг: install_ping.bat на ПК или cron-job.org.
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Проверяем, что бот отвечает
+        run: |
+          set -e
+          URL="${{ vars.BOT_URL }}"
+          if [ -z "$URL" ]; then
+            URL="https://english-starter-bot.onrender.com"
+          fi
+          echo "Пингую $URL/health"
+          code=$(curl -s -o /dev/null -w "%{http_code}" -m 60 "$URL/health" || echo 000)
+          echo "GET $URL/health -> $code"
+          if [ "$code" != "200" ]; then
+            echo "Сервис не ответил 200 — возможно, он просыпается. Повторяю через 20 секунд."
+            sleep 20
+            curl -s -o /dev/null -w "повтор: %{http_code}\n" -m 60 "$URL/health" || true
+          fi
