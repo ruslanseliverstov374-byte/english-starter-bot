@@ -155,7 +155,7 @@ class Bot:
         self.reminder_thread = None
         self.stopping = False
         self.started_at = utcnow()
-        self.pinned_checked = False
+        self.pinned_checked = set()      # какие чаты уже проверяли на закреплённую копию
         # Хранилище снимков базы: внешний key-value либо закреплённый файл в Telegram.
         self.remote = remote if remote is not None else build_snapshot_provider(self.tg, log=log)
         if isinstance(self.remote, TelegramSnapshot) and not self.remote.chat_id:
@@ -1173,30 +1173,32 @@ class Bot:
     def maybe_restore_from_pinned(self, chat_id):
         """Спасательный круг после холодного старта бесплатного хостинга.
 
-        Если база пустая (никто ещё не занимался), а в чате владельца лежит
-        закреплённая копия — восстанавливаем прогресс целиком. Так бот
-        поднимается сам, без переменных окружения и ручных действий.
+        Если база пустая (никто ещё не занимался), а в чате этого человека лежит
+        закреплённая копия — восстанавливаем прогресс целиком. Так бот поднимается
+        сам, без переменных окружения и ручных действий. Каждый чат проверяется
+        один раз за запуск, поэтому восстановиться может любой владелец копии.
         """
-        if not isinstance(self.remote, TelegramSnapshot) or self.pinned_checked:
+        if not isinstance(self.remote, TelegramSnapshot) or chat_id in self.pinned_checked:
             return False
+        self.pinned_checked.add(chat_id)
         try:
             with self.store.lock:
                 answers = self.store.conn.execute("SELECT COUNT(*) AS c FROM answers").fetchone()["c"]
                 learned = self.store.conn.execute(
                     "SELECT COUNT(*) AS c FROM srs WHERE learned = 1").fetchone()["c"]
             if answers or learned:
-                self.pinned_checked = True          # в базе есть настоящая работа - не трогаем
-                return False
+                return False                        # в базе есть настоящая работа - не трогаем
 
             remote = TelegramSnapshot(self.tg, chat_id=chat_id, log=log)
             if not remote.has_snapshot():
-                self.pinned_checked = True
                 return False
 
             temp = os.path.join(DATA_DIR, "pinned-restore.db")
             if not remote.download(temp):
-                self.pinned_checked = True
                 return False
+
+            old_uploader = self.uploader
+            old_uploader.stopping = True            # старый поток больше не нужен
 
             db_path = self.store.path
             safety = db_path + ".before-restore"
@@ -1210,12 +1212,12 @@ class Bot:
             self.remote.chat_id = chat_id
             interval = int(os.environ.get("SNAPSHOT_INTERVAL") or 1800)
             self.uploader = SnapshotUploader(self.store, self.remote, interval=interval, log=log)
-            self.pinned_checked = True
+            self.uploader.start()
+            atexit.register(self.uploader.upload_now)
             log("прогресс восстановлен из закреплённой копии в чате %s" % chat_id)
             return True
         except Exception:
             log("не удалось восстановить прогресс из копии:\n%s" % traceback.format_exc())
-            self.pinned_checked = True
             return False
 
     # ------------------------------------------------------------------
